@@ -2,101 +2,82 @@ import { useState, useEffect } from 'react';
 
 const run = Symbol();
 
-type Model = { [key: string]: any };
-type Sub = { keys: string[]; setModel: (payload: Model) => void };
-type Stack = (Model & { [run]: Sub[] })[];
-type Use = (model?: Model) => any;
+type Model = { [key: string]: any; [run]?: { keys: string[]; setModel: SetModel }[] };
+type SetLoading = (model: Model, key: string, loading: boolean) => void;
+type SetModel = (payload: Model) => void;
+type UseModel = (model: Model, keys?: string[]) => Model;
 
-const MIS_USE = (act: string): string => `To ${act} a model, param to use() should be an object`;
-const isObj = (val: any): boolean => Object.prototype.toString.call(val) === '[object Object]';
-const showErr = (msg: string) => {
-  throw new Error(msg);
+const MIS_USE = (): string => 'Please call setModel() inside a model';
+const NOT_OBJ = (key: string) => `${key} should be an object`;
+const NOT_ARR = (key: string) => `${key} should be an array`;
+const notObj = (val: any): boolean => Object.prototype.toString.call(val) !== '[object Object]';
+
+const map: WeakMap<Model, Model> = new WeakMap();
+const stack: Model[] = [];
+
+const setLoading: SetLoading = (model, key, loading) => {
+  model[key].loading = loading;
+  setModel({ [key]: model[key] });
 };
 
-const stack: Stack = [];
-
-const use: Use = (model) => {
-  const __DEV__ = process.env.NODE_ENV !== 'production';
+export const setModel: SetModel = (payload) => {
   const currentModel = stack[0];
-
-  // getter
-  if (model === undefined) {
-    if (currentModel) return currentModel;
-    if (__DEV__) showErr(MIS_USE('initialize'));
-    return;
+  if (process.env.NODE_ENV !== 'production') {
+    if (!currentModel) throw new Error(MIS_USE());
+    if (notObj(payload)) throw new Error(NOT_OBJ('payload'));
   }
 
-  // setter
-  if (currentModel) {
-    if (__DEV__ && !isObj(model)) showErr(MIS_USE('set'));
-
-    const newModel = { ...Object.assign(currentModel, model) };
-    const subs = currentModel[run];
-    const updateKeys = Object.keys(model);
-    subs.forEach(({ keys, setModel }) => {
-      if (updateKeys.some((key) => keys.includes(key))) setModel(newModel);
-    });
-    return;
-  }
-
-  // initializer
-  if (__DEV__ && !isObj(model)) showErr(MIS_USE('initialize'));
-
-  const litProto = Object.defineProperty({}, run, { value: [] });
-  const litModel = Object.setPrototypeOf({}, litProto);
-
-  const setLoading = (key: string, loading: boolean) => {
-    litModel[key].loading = loading;
-    use({ [key]: litModel[key] });
-  };
-
-  Object.entries(model).forEach(([key, val]) => {
-    if (typeof val !== 'function') {
-      litModel[key] = val;
-      return;
-    }
-    litModel[key] = (...args: any) => {
-      stack.unshift(litModel);
-      const res = val(...args);
-      if (!res || typeof res.then !== 'function') {
-        stack.shift();
-        return res;
-      }
-      return new Promise((resolve, reject) => {
-        setLoading(key, true);
-        const pro = res.then(resolve).catch(reject);
-        pro.finally(() => {
-          setLoading(key, false);
-          stack.shift();
-        });
-      });
-    };
+  Object.assign(currentModel, payload);
+  const subs = currentModel[run] || [];
+  const updateKeys = Object.keys(payload);
+  subs.forEach(({ keys, setModel }) => {
+    if (updateKeys.some((key) => keys.includes(key))) setModel(payload);
   });
-
-  return (...keys: string[]) => {
-    try {
-      const [, setModel] = useState();
-      const empty = keys.length === 0;
-
-      useEffect(() => {
-        const subs = litModel[run];
-        const item = { keys: empty ? Object.keys(litModel) : keys, setModel };
-        subs.push(item);
-        return () => {
-          subs.splice(subs.indexOf(item), 1);
-        };
-      }, []);
-
-      if (empty) return litModel;
-
-      return keys.reduce((obj: Model, key) => {
-        obj[key] = litModel[key];
-        return obj;
-      }, {});
-    } catch {
-      return litModel;
-    }
-  };
 };
 
-export default use;
+export const useModel: UseModel = (model, keys) => {
+  if (process.env.NODE_ENV !== 'production') {
+    if (notObj(model)) throw new Error(NOT_OBJ('model'));
+    if (keys !== undefined && !Array.isArray(keys)) throw new Error(NOT_ARR('keys'));
+  }
+
+  if (map.get(model) === undefined) {
+    Object.setPrototypeOf(model, Object.defineProperty({}, run, { value: [] }));
+    Object.keys(model).forEach((key) => {
+      const val = model[key];
+      if (typeof val !== 'function') return;
+      model[key] = (...args: any) => {
+        stack.unshift(model);
+        const res = val(...args);
+        if (!res || typeof res.then !== 'function') {
+          stack.shift();
+          return res;
+        }
+        return new Promise((resolve, reject) => {
+          setLoading(model, key, true);
+          const pro = res.then(resolve).catch(reject);
+          pro.finally(() => {
+            setLoading(model, key, false);
+            stack.shift();
+          });
+        });
+      };
+    });
+    map.set(model, model);
+  }
+
+  const [, setState] = useState();
+
+  useEffect(() => {
+    if (keys === undefined) keys = Object.keys(model);
+    if (keys.length === 0) return;
+    const subs = model[run] || [];
+    const item = { keys, setModel: setState };
+    subs.push(item);
+    return () => {
+      subs.splice(subs.indexOf(item), 1);
+    };
+  }, []);
+
+  return model;
+};
